@@ -10,6 +10,9 @@
 (define-constant ERR_INVALID_STATUS (err u106))
 (define-constant ERR_BATCH_EXPIRED (err u107))
 (define-constant ERR_NOT_AUTHORIZED_VERIFIER (err u108))
+(define-constant ERR_INVALID_RATING (err u109))
+(define-constant ERR_BATCH_NOT_VERIFIED (err u110))
+(define-constant ERR_ALREADY_RATED (err u111))
 
 (define-constant STATUS_PENDING u0)
 (define-constant STATUS_VERIFIED u1)
@@ -62,6 +65,21 @@
   { scan-count: uint }
 )
 
+(define-map batch-ratings
+  { batch-id: uint, rater: principal }
+  { rating: uint, timestamp: uint }
+)
+
+(define-map batch-rating-stats
+  { batch-id: uint }
+  { total-rating: uint, rating-count: uint }
+)
+
+(define-map manufacturer-rating-stats
+  { manufacturer: principal }
+  { total-rating: uint, rating-count: uint }
+)
+
 (map-set manufacturers CONTRACT_OWNER true)
 (map-set authorized-verifiers CONTRACT_OWNER true)
 
@@ -95,6 +113,46 @@
 
 (define-read-only (get-current-batch-counter)
   (var-get batch-counter)
+)
+
+(define-read-only (get-batch-rating (batch-id uint) (rater principal))
+  (map-get? batch-ratings { batch-id: batch-id, rater: rater })
+)
+
+(define-read-only (get-batch-rating-stats (batch-id uint))
+  (default-to { total-rating: u0, rating-count: u0 } (map-get? batch-rating-stats { batch-id: batch-id }))
+)
+
+(define-read-only (get-batch-average-rating (batch-id uint))
+  (let
+    (
+      (stats (get-batch-rating-stats batch-id))
+      (total (get total-rating stats))
+      (count (get rating-count stats))
+    )
+    (if (> count u0)
+      (ok (/ (* total u100) count))
+      (err u0)
+    )
+  )
+)
+
+(define-read-only (get-manufacturer-rating-stats (manufacturer principal))
+  (default-to { total-rating: u0, rating-count: u0 } (map-get? manufacturer-rating-stats { manufacturer: manufacturer }))
+)
+
+(define-read-only (get-manufacturer-average-rating (manufacturer principal))
+  (let
+    (
+      (stats (get-manufacturer-rating-stats manufacturer))
+      (total (get total-rating stats))
+      (count (get rating-count stats))
+    )
+    (if (> count u0)
+      (ok (/ (* total u100) count))
+      (err u0)
+    )
+  )
 )
 
 (define-read-only (is-batch-valid (batch-id uint))
@@ -275,5 +333,42 @@
       product-name: (get product-name batch-data),
       scan-number: (+ current-scans u1)
     })
+  )
+)
+
+(define-public (rate-batch (batch-id uint) (rating uint))
+  (let
+    (
+      (batch-data (unwrap! (get-batch-info batch-id) ERR_BATCH_NOT_FOUND))
+      (batch-stats (get-batch-rating-stats batch-id))
+      (manufacturer-stats (get-manufacturer-rating-stats (get manufacturer batch-data)))
+      (existing-rating (get-batch-rating batch-id tx-sender))
+    )
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_RATING)
+    (asserts! (is-eq (get status batch-data) STATUS_VERIFIED) ERR_BATCH_NOT_VERIFIED)
+    (asserts! (is-none existing-rating) ERR_ALREADY_RATED)
+    
+    (map-set batch-ratings
+      { batch-id: batch-id, rater: tx-sender }
+      { rating: rating, timestamp: stacks-block-height }
+    )
+    
+    (map-set batch-rating-stats
+      { batch-id: batch-id }
+      {
+        total-rating: (+ (get total-rating batch-stats) rating),
+        rating-count: (+ (get rating-count batch-stats) u1)
+      }
+    )
+    
+    (map-set manufacturer-rating-stats
+      { manufacturer: (get manufacturer batch-data) }
+      {
+        total-rating: (+ (get total-rating manufacturer-stats) rating),
+        rating-count: (+ (get rating-count manufacturer-stats) u1)
+      }
+    )
+    
+    (ok true)
   )
 )
